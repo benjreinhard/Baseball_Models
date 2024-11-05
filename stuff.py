@@ -94,9 +94,7 @@ def calculate_stuff_plus(X_new, feature_importances, pitch_type, features):
 def main():
     csv_path = '/Users/benjaminreinhard/Desktop/trackman.csv'
     
-    print("Loading data...")
     df = pd.read_csv(csv_path, low_memory=False)
-    print(f"Data loaded with shape: {df.shape}")
     
     pitch_types = ['fastball', 'slider', 'curveball', 'offspeed']
     
@@ -117,7 +115,6 @@ def main():
 
     # Process each pitch type with scaled run values
     for pitch_type in pitch_types:
-        print(f"\nProcessing {pitch_type} pitches...")
         X, y, features, df_filtered = process_pitch_type(df, pitch_type, global_mean, global_std)
 
         # Print average metrics for the pitch type
@@ -159,8 +156,6 @@ def main():
         final_importances_csv = '/Users/benjaminreinhard/Desktop/feature_importances.csv'
         final_importances_df.to_csv(final_importances_csv, index=False)
         print(f"Feature importances saved to {final_importances_csv}")
-    else:
-        print("No valid feature importances to save.")
 
     print("\nOverall Stuff+ Statistics:")
     for stat in stuff_plus_stats:
