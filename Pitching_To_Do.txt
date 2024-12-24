@@ -1,0 +1,6 @@
+1. Take new run values
+2. Create model to run for all the various levels (D1/2/3/Juco/all college/MLB)
+  -Model is essentially the stuff+ model but with the addition of location as features
+3. Make sure acceleration for movement -- this should be done with Stuff+ 
+4. Total incorporation into app -- would only be for import page
+  -same thing with various levels and being able to select for comparison 
