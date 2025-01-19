@@ -1,2 +1,3 @@
-# stuff_plus_update
-update for stuff plus model using run values &amp; d3 dataset
+# Pitching+ Model Updates
+  -Revamped Stuff+, Location+, and Pitching+ models
+  -Adding xGB% model
