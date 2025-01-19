@@ -1,5 +1,0 @@
-1. Again, use new run values for all levels (D1/2/3/Juco/MLB)
-2. 2 separate models: 1 that controls for stuff+ and another that is purely based on location
-  -does it make sense to split since would be import only?
-3. Total incorporation into app, same deal with selection between various models for comparison across levels
-4. Maybe other command projects too; see this article: https://blogs.fangraphs.com/revisiting-the-kirby-index/
