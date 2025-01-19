@@ -1,0 +1,88 @@
+---
+title: "rv"
+output: html_document
+date: "2025-01-13"
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+
+D1_Seq <- read.csv("~/Desktop/d1_trackman.csv") %>% 
+  distinct()
+
+## wOBACON values from baseball savant
+wOBACON_values <- c("Single" = 0.97, "Out" = 0, "Double" = 1.36, "Triple" = 1.71, "HomeRun" = 2.11)
+
+## filtering exit velocity to not capture noise on extremely low EV values
+D1_Seq_filtered <- D1_Seq %>%
+  filter(PitchCall == "InPlay") %>% 
+  mutate(wOBACON = wOBACON_values[PlayResult]) %>%  
+  filter(!is.na(wOBACON), ExitSpeed > 80)  
+
+exit_velocity_summary <- D1_Seq_filtered %>%
+  group_by(ExitSpeed) %>%
+  summarize(
+    avg_wOBACON = mean(wOBACON, na.rm = TRUE), 
+    count = n()
+  ) %>%
+  ungroup() %>%
+  arrange(ExitSpeed)  
+
+loess_fit <- loess(avg_wOBACON ~ ExitSpeed, data = exit_velocity_summary, span = 0.3)
+
+smoothed_values <- predict(loess_fit, exit_velocity_summary$ExitSpeed)
+derivatives <- diff(smoothed_values) / diff(exit_velocity_summary$ExitSpeed)
+
+exit_velocity_summary <- exit_velocity_summary %>%
+  mutate(
+    smoothed_wOBACON = smoothed_values,  
+    derivative = c(NA, derivatives)
+  )
+
+threshold_slope <- 0.01  
+first_significant_rise <- exit_velocity_summary %>%
+  filter(derivative > threshold_slope) %>%  
+  slice(1)  
+
+hard_cutoff <- first_significant_rise$ExitSpeed
+
+print("First Significant Rise in Slope (Threshold):")
+print(first_significant_rise)
+
+print(paste("Final Hard Hit Threshold: ", hard_cutoff, "mph"))
+
+exit_velocity_summary <- exit_velocity_summary %>%
+  mutate(
+    contact_type = ifelse(ExitSpeed > hard_cutoff, "Hard Hit", "Not Hard Hit")
+  )
+
+contact_summary <- exit_velocity_summary %>%
+  group_by(contact_type) %>%
+  summarize(
+    avg_exit_speed = mean(ExitSpeed, na.rm = TRUE),
+    avg_wOBACON = mean(avg_wOBACON, na.rm = TRUE),
+    count = n(),
+    threshold_used = hard_cutoff
+  )
+
+print("Contact Type Summary (Including Threshold Used):")
+print(contact_summary)
+
+ggplot(exit_velocity_summary, aes(x = ExitSpeed)) +
+  geom_line(aes(y = smoothed_wOBACON), color = "blue", size = 1) +  
+  geom_line(
+    aes(y = derivative * max(smoothed_wOBACON) / max(derivative, na.rm = TRUE)), 
+    color = "red", linetype = "dashed"
+  ) +  
+  geom_vline(xintercept = hard_cutoff, linetype = "dotted", color = "green", size = 1) +  
+  labs(
+    title = "Threshold for Hard Hit vs. Not Hard Hit (Filtered > 80 mph)",
+    x = "Exit Velocity (mph)",
+    y = "Value (wOBACON and Scaled Derivative)"
+  ) +
+  theme_minimal()
+
+
+```
+
