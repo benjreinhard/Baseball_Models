@@ -1,3 +1,0 @@
-1. Again, recalculated run values and for all levels (D1/2/3/JUCO/MLB)
-2. 2 separate models: on import that incorporates location and solely based on pitch characteristics
-3. Total incorporation between app and selection between levels 
