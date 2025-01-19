@@ -1,7 +1,0 @@
-1. Calculate Run Values for D1/D2/D3/JUCO/Overall College 
-2. Also do a model for MLB -- probably will need to have fewer features
-3. Change movement (VB/HB) into acceleration in general format
-4. Find a way to control for location so it doesn't boost stuff w/consistent location
-5. Total incorporation into app
-  -Can select any of the models to see how you compare across levels
-6. Separate import and manual entry for stuff models to clean up app page
