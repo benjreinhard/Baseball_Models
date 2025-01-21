@@ -16,14 +16,36 @@
     -some sort of maximize velocity while minimize stress. 
 
 7. Stuff+ Model
-  -See Stuff_To_Do.txt file in Stuff_Plus_Model Repo
+  -Calculate Run Values for D1/D2/D3/JUCO/Overall College
+  -Also do a model for MLB -- probably will need to have fewer features
+  -Change movement (VB/HB) into acceleration in general format
+  -Find a way to control for location so it doesn't boost stuff w/consistent location
+  -Total incorporation into app
+    -Can select any of the models to see how you compare across levels
+  -Separate import and manual entry for stuff models to clean up app page
 
 8. Pitching+ Model
-  -See Pitching_To_Do.txt file in Stuff_Plus_Model Repo
+  -Take new run values
+  -Create model to run for all the various levels (D1/2/3/Juco/all college/MLB)
+    -Model is essentially the stuff+ model but with the addition of location as features
+  -Make sure acceleration for movement -- this should be done with Stuff+ 
+    -Total incorporation into app -- would only be for import page
+  -same thing with various levels and being able to select for comparison 
 
 9. Location+ Model
-  -See Location_To_Do.txt file in Stuff_Plus_Model Repo
+  -Again, use new run values for all levels (D1/2/3/Juco/MLB)
+  -2 separate models: 1 that controls for stuff+ and another that is purely based on location
+    -does it make sense to split since would be import only?
+  -Total incorporation into app, same deal with selection between various models for comparison across levels
+  -Maybe other command projects too; see this article: https://blogs.fangraphs.com/revisiting-the-kirby-index/
+
 
 10. xGB% Model
-  -See xGB_To_Do.txt file in Stuff_Plus_Model Repo
+  -Again, recalculated run values and for all levels (D1/2/3/JUCO/MLB)
+  -2 separate models: on import that incorporates location and solely based on pitch characteristics
+  -Total incorporation between app and selection between levels
+
+
+
+
 
