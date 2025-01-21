@@ -1,0 +1,29 @@
+1. Swing decision model
+  -modeled off the U AZ process chart
+  -swing decision score a la seager?
+
+2. Contact Rate Score? hit tool score?
+
+3. xWhiff
+
+4. Mix+
+
+5. Match+
+
+6. Biomechanics Models
+  -Mechanics score: with velocity
+  -Velocity with mechanics
+    -some sort of maximize velocity while minimize stress. 
+
+7. Stuff+ Model
+  -See Stuff_To_Do.txt file in Stuff_Plus_Model Repo
+
+8. Pitching+ Model
+  -See Pitching_To_Do.txt file in Stuff_Plus_Model Repo
+
+9. Location+ Model
+  -See Location_To_Do.txt file in Stuff_Plus_Model Repo
+
+10. xGB% Model
+  -See xGB_To_Do.txt file in Stuff_Plus_Model Repo
+
