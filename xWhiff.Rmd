@@ -1,0 +1,268 @@
+---
+title: "xWhiff% models"
+output: html_document
+date: "2025-02-09"
+---
+
+```{r setup, include=FALSE}
+### xWhiff% model: one for metrics only & one with location incorporated 
+```
+
+```{r}
+## import packages
+
+library(data.table)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(stats)
+library(dplyr)
+library(pROC)
+
+```
+
+```{r}
+## load df/view columns
+
+df <- read.csv("~/Desktop/d1_trackman.csv")
+
+print(df)
+
+print(colnames(df))
+
+```
+
+```{r}
+## function to preprocess data
+
+preprocess_data <- function(df) {
+  df %>%
+    # Drop duplicates
+    distinct() %>%
+    
+    # Select only needed columns
+    select(
+      PitcherId, Date, PitcherThrows, BatterId, Balls, Strikes,
+      TaggedPitchType, PitchCall, KorBB, TaggedHitType, PlayResult,
+      RelSpeed, SpinAxis, RelHeight, RelSide, Extension,
+      InducedVertBreak, HorzBreak, PlateLocHeight, PlateLocSide, Angle
+    ) %>%
+    
+    # Keep only swings
+    filter(PitchCall %in% c("InPlay", "FoulBall", "StrikeSwinging")) %>%
+    
+    # Filter out pitchers with "Both" or "Undefined" throwing hands
+    filter(!(PitcherThrows %in% c("Both", "Undefined")) & !is.na(PitcherThrows)) %>%
+    
+    # Adjust SpinAxis for left-handed pitchers
+    mutate(SpinAxis = ifelse(PitcherThrows == "Left", 360 - SpinAxis, SpinAxis)) %>%
+    
+    # Adjust RelSide and HorzBreak for left-handed pitchers
+    mutate(
+      RelSide = ifelse(PitcherThrows == "Left", abs(RelSide), RelSide),
+      HorzBreak = ifelse(PitcherThrows == "Left", abs(HorzBreak), HorzBreak)
+    ) %>%
+    
+    # Filter out invalid pitch types
+    filter(!(TaggedPitchType %in% c("Other", "Undefined", ","))) %>%
+    
+    # Re-group TaggedPitchType into categories
+    mutate(TaggedPitchType = case_when(
+      TaggedPitchType %in% c("ChangeUp", "Knuckleball", "Splitter") ~ "Offspeed",
+      TaggedPitchType %in% c("Curveball") ~ "Curveball",
+      TaggedPitchType %in% c("Fastball", "FourSeamFastBall") ~ "Fastball",
+      TaggedPitchType %in% c("OneSeamFastball", "Sinker", "TwoSeamFastBall") ~ "Sec_Fastball",
+      TaggedPitchType %in% c("Slider") ~ "Slider",
+      TaggedPitchType %in% c("Cutter") ~ "Cutter",
+      TRUE ~ TaggedPitchType
+    )) %>%
+    
+    # Add whiff column
+    mutate(Whiff = ifelse(PitchCall == "StrikeSwinging", 1, 0)) %>%
+    
+    # Ensure Whiff is numeric
+    mutate(Whiff = as.numeric(Whiff))
+}
+
+```
+
+```{r}
+## preprocess data
+
+df <- preprocess_data(df)
+```
+
+
+```{r}
+## creating separate df for each pitch type and printing dimensions
+
+fb_df <- df %>%
+  filter(TaggedPitchType == "Fastball")
+dim(fb_df)
+
+sec_fb_df <- df %>%
+  filter(TaggedPitchType == "Sec_Fastball")
+dim(sec_fb_df)
+
+cut_df <- df %>%
+  filter(TaggedPitchType == "Cutter")
+dim(cut_df)
+
+offs_df <- df %>%
+  filter(TaggedPitchType == "Offspeed")
+dim(offs_df)
+
+cb_df <- df %>%
+  filter(TaggedPitchType == "Curveball")
+dim(cb_df)
+
+sl_df <- df %>%
+  filter(TaggedPitchType == "Slider")
+dim(sl_df)
+
+```
+
+```{r}
+## setting features and target for location incorporated model
+
+features <- c("RelSpeed", "SpinAxis", "RelHeight", "RelSide", 
+              "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide")
+target <- "GB"
+
+```
+
+```{r}
+## setting features for no location model
+
+no_loc_features <- c("RelSpeed", "SpinAxis", "RelHeight", "RelSide", 
+              "InducedVertBreak", "HorzBreak")
+
+```
+
+
+```{r}
+## function for xgboost model
+
+run_xgboost_whiff_model <- function(data, features, pitch_type = "Unknown") {
+  set.seed(42)
+  
+  # Train test split
+  train_index <- caret::createDataPartition(data$Whiff, p = 0.8, list = FALSE)
+  train_data <- data[train_index, ]
+  test_data <- data[-train_index, ]
+  
+  train_matrix <- as.matrix(train_data[, features])
+  test_matrix <- as.matrix(test_data[, features])
+  y_train <- train_data$Whiff
+  y_test <- test_data$Whiff
+  
+  dtrain <- xgboost::xgb.DMatrix(data = train_matrix, label = y_train)
+  dtest <- xgboost::xgb.DMatrix(data = test_matrix, label = y_test)
+  
+  # parameters 
+  params <- list(
+    objective = "binary:logistic",  
+    eval_metric = "logloss",  
+    eta = 0.05,  
+    max_depth = 6,  
+    subsample = 0.8,  
+    colsample_bytree = 0.8,
+    scale_pos_weight = 2.5
+  )
+  
+  # Train model
+  model <- xgboost::xgb.train(params = params, data = dtrain, nrounds = 100,
+                              watchlist = list(train = dtrain, test = dtest), verbose = 0)
+  
+  # Predictions
+  pred_probs <- predict(model, dtest)
+  preds <- ifelse(pred_probs > 0.5, 1, 0)
+  
+  # Metrics
+  accuracy <- mean(preds == y_test)
+  brier_score <- mean((pred_probs - y_test)^2)
+  conf_matrix <- table(Predicted = preds, Actual = y_test)
+  
+  # glm to calibrate predictions
+  platt_model <- glm(y_test ~ pred_probs, family = binomial)
+  calibrated_probs <- predict(platt_model, type = "response")
+  brier_score_calibrated <- mean((calibrated_probs - y_test)^2)
+  
+  cat("\n---", pitch_type, "---\n")
+  cat("Accuracy:", round(accuracy, 4), "\n")
+  cat("Brier Score:", round(brier_score, 4), "\n")
+  cat("Calibrated Brier Score:", round(brier_score_calibrated, 4), "\n")
+  print(conf_matrix)
+  
+  # feature importances
+  importance <- xgboost::xgb.importance(feature_names = features, model = model)
+  xgboost::xgb.plot.importance(importance)
+  
+  # Histogram
+  hist(pred_probs, breaks = 30, main = paste(pitch_type, "Whiff Probability"), xlab = "Probability")
+  hist(calibrated_probs, breaks = 30, main = paste(pitch_type, "Calibrated Probability"), xlab = "Probability")
+  
+  list(
+    model = model,
+    accuracy = accuracy,
+    brier = brier_score,
+    brier_cal = brier_score_calibrated,
+    calibrated_probs = calibrated_probs,
+    raw_probs = pred_probs
+  )
+}
+
+```
+
+
+```{r}
+## fb models
+
+fb_model_loc <- run_xgboost_whiff_model(fb_df, features, "Fastball - With Location")
+fb_model_noloc <- run_xgboost_whiff_model(fb_df, no_loc_features, "Fastball - No Location")
+
+```
+
+
+```{r}
+## sec fastball models
+
+secfb_model_loc <- run_xgboost_whiff_model(sec_fb_df, features, "Secondary Fastball - With Location")
+secfb_model_noloc <- run_xgboost_whiff_model(sec_fb_df, no_loc_features, "Secondary Fastball - No Location")
+
+```
+
+
+```{r}
+## cutter models
+
+cut_model_loc <- run_xgboost_whiff_model(cut_df, features, "Cutter - With Location")
+cut_model_noloc <- run_xgboost_whiff_model(cut_df, no_loc_features, "Cutter - No Location")
+
+```
+
+
+```{r}
+## offspeed models
+
+offs_model_loc <- run_xgboost_whiff_model(offs_df, features, "Offspeed - With Location")
+offs_model_noloc <- run_xgboost_whiff_model(offs_df, no_loc_features, "Offspeed - No Location")
+
+```
+
+```{r}
+## cb models
+
+cb_model_loc <- run_xgboost_whiff_model(cb_df, features, "Curveball - With Location")
+cb_model_noloc <- run_xgboost_whiff_model(cb_df, no_loc_features, "Curveball - No Location")
+
+```
+
+```{r}
+## sl models
+
+sl_model_loc <- run_xgboost_whiff_model(sl_df, features, "Slider - With Location")
+sl_model_noloc <- run_xgboost_whiff_model(sl_df, no_loc_features, "Slider - No Location")
+
+```
+
