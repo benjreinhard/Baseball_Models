@@ -1,0 +1,591 @@
+---
+title: "xGB model"
+output: html_document
+date: "2025-02-09"
+---
+
+```{r setup, include=FALSE}
+## xGB% model
+## separate models with & without location
+```
+
+```{r}
+## import packages
+
+library(data.table)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(stats)
+library(dplyr)
+library(pROC)
+
+```
+
+```{r}
+## loading df and viewing columns
+
+df <- read.csv("~/Desktop/d1_trackman.csv")
+
+print(df)
+
+print(colnames(df))
+
+```
+
+```{r}
+## function to process data
+
+preprocess_data <- function(df) {
+  df %>%
+    distinct() %>% 
+    filter(PitchCall == "InPlay") %>% 
+    filter(!(PitcherThrows %in% c("Both", "Undefined")) & !is.na(PitcherThrows)) %>%
+    mutate(
+      SpinAxis = ifelse(PitcherThrows == "Left", 360 - SpinAxis, SpinAxis), 
+      RelSide = ifelse(PitcherThrows == "Left", abs(RelSide), RelSide),
+      HorzBreak = ifelse(PitcherThrows == "Left", abs(HorzBreak), HorzBreak),
+      TaggedPitchType = case_when(
+        TaggedPitchType %in% c("ChangeUp", "Knuckleball", "Splitter") ~ "Offspeed",
+        TaggedPitchType == "Curveball" ~ "Curveball",
+        TaggedPitchType %in% c("Fastball", "FourSeamFastBall") ~ "Fastball",
+        TaggedPitchType %in% c("OneSeamFastball", "Sinker", "TwoSeamFastBall") ~ "Sec_Fastball",
+        TaggedPitchType == "Slider" ~ "Slider",
+        TaggedPitchType == "Cutter" ~ "Cutter",
+        TRUE ~ TaggedPitchType
+      ),
+      GB = as.numeric(ifelse(TaggedHitType %in% c("GroundBall", "Groundball"), 1, 0))
+    ) %>%
+    filter(!(TaggedPitchType %in% c("Other", "Undefined", ",")))
+}
+
+```
+
+```{r}
+# preprocess data
+
+df <- preprocess_data(df)
+
+```
+
+```{r}
+# function to separate by pitch types
+
+get_pitch_type_df <- function(df, pitch_type) {
+  df %>% filter(TaggedPitchType == pitch_type)
+}
+
+```
+
+```{r}
+# creating pitch type df and checking dimensions
+
+fb_df <- get_pitch_type_df(df, "Fastball")
+
+sec_fb_df <- get_pitch_type_df(df, "Sec_Fastball")
+
+cut_df <- get_pitch_type_df(df, "Cutter")
+
+offs_df <- get_pitch_type_df(df, "Offspeed")
+
+cb_df <- get_pitch_type_df(df, "Curveball")
+
+sl_df <- get_pitch_type_df(df, "Slider")
+
+lapply(list(fb_df, sec_fb_df, cut_df, offs_df, cb_df, sl_df), dim)
+
+```
+
+
+```{r}
+## setting features and target for models
+
+features <- c("RelSpeed", "SpinAxis", "RelHeight", "RelSide", 
+              "InducedVertBreak", "HorzBreak", "PlateLocHeight", "PlateLocSide")
+
+no_loc_features <- c("RelSpeed", "SpinAxis", "RelHeight", "RelSide", 
+              "InducedVertBreak", "HorzBreak")
+
+target <- "GB"
+
+```
+
+```{r}
+## function to train and evaluate model
+
+train_and_eval_model <- function(df, features, target, best_params, nrounds = 100) {
+  set.seed(42)
+  
+  train_index <- createDataPartition(df[[target]], p = 0.8, list = FALSE)
+  train_data <- df[train_index, ]
+  test_data <- df[-train_index, ]
+  
+  train_matrix <- as.matrix(train_data[, features])
+  test_matrix <- as.matrix(test_data[, features])
+  y_train <- train_data[[target]]
+  y_test <- test_data[[target]]
+  
+  dtrain <- xgb.DMatrix(data = train_matrix, label = y_train)
+  dtest <- xgb.DMatrix(data = test_matrix, label = y_test)
+  
+  model <- xgb.train(
+    params = best_params,
+    data = dtrain,
+    nrounds = nrounds,
+    watchlist = list(train = dtrain, test = dtest),
+    verbose = 0
+  )
+  
+  cv_results <- xgb.cv(
+    params = best_params,
+    data = dtrain,
+    nrounds = nrounds,
+    nfold = 5,
+    verbose = 0
+  )
+  
+  pred_probs <- predict(model, dtest)
+  preds <- ifelse(pred_probs > 0.5, 1, 0)
+  
+  accuracy <- mean(preds == y_test)
+  conf_matrix <- table(Predicted = preds, Actual = y_test)
+  brier_score <- mean((pred_probs - y_test)^2)
+  
+  list(
+    model = model,
+    cv_logloss = min(cv_results$evaluation_log$test_logloss_mean),
+    accuracy = accuracy,
+    confusion_matrix = conf_matrix,
+    importance = xgb.importance(feature_names = features, model = model),
+    brier = brier_score,
+    probs = pred_probs,
+    mean_prob = mean(pred_probs),
+    sd_prob = sd(pred_probs),
+    true_mean = mean(df[[target]])
+  )
+}
+
+```
+
+```{r}
+## function to save models
+
+save_xgb_model <- function(model, filepath) {
+  saveRDS(model, filepath)
+  message(paste("Model saved to:", filepath))
+}
+
+```
+
+```{r}
+## fb model: location included
+ 
+fb_params <- list(
+  max_depth = 6,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+fb_model_results <- train_and_eval_model(fb_df, features, target, fb_params)
+
+print(paste("Logloss:", round(fb_model_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(fb_model_results$accuracy, 4)))
+print(fb_model_results$confusion_matrix)
+print(paste("Brier Score:", round(fb_model_results$brier, 4)))
+
+xgb.plot.importance(fb_model_results$importance)
+
+hist(fb_model_results$probs, breaks = 30,
+     main = "GB Probability Distribution", xlab = "Probability")
+
+print(fb_model_results$mean_prob)
+print(fb_model_results$sd_prob)
+print(fb_model_results$true_mean)
+
+```
+
+```{r}
+## fb model: no location
+
+fb_noloc_params <- list(
+  max_depth = 7,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+fb_noloc_results <- train_and_eval_model(fb_df, no_loc_features, target, fb_noloc_params)
+
+print(paste("Logloss:", round(fb_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(fb_noloc_results$accuracy, 4)))
+print(fb_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(fb_noloc_results$brier, 4)))
+
+xgb.plot.importance(fb_noloc_results$importance)
+
+hist(fb_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (No Location)", xlab = "Probability")
+
+print(fb_noloc_results$mean_prob)
+print(fb_noloc_results$sd_prob)
+print(fb_noloc_results$true_mean)
+
+```
+
+```{r}
+## save fastball no location model
+
+save_xgb_model(fb_noloc_results$model, "~/Desktop/fb_exgb.rds")
+
+```
+
+```{r}
+## sec fastball model: with location
+
+secfb_params <- list(
+  max_depth = 6,
+  eta = 0.04,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+secfb_results <- train_and_eval_model(sec_fb_df, features, target, secfb_params)
+
+print(paste("Logloss:", round(secfb_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(secfb_results$accuracy, 4)))
+print(secfb_results$confusion_matrix)
+print(paste("Brier Score:", round(secfb_results$brier, 4)))
+
+xgb.plot.importance(secfb_results$importance)
+
+hist(secfb_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Secondary FB)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(secfb_results$mean_prob, 4)))
+print(secfb_results$sd_prob)
+print(paste("Mean Actual GB:", round(secfb_results$true_mean, 4)))
+
+```
+
+
+```{r}
+## sec fastball model: no location
+
+secfb_noloc_params <- list(
+  max_depth = 7,
+  eta = 0.03,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+secfb_noloc_results <- train_and_eval_model(sec_fb_df, no_loc_features, target, secfb_noloc_params)
+
+print(paste("Logloss:", round(secfb_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(secfb_noloc_results$accuracy, 4)))
+print(secfb_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(secfb_noloc_results$brier, 4)))
+
+xgb.plot.importance(secfb_noloc_results$importance)
+
+hist(secfb_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Secondary FB, No Location)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(secfb_noloc_results$mean_prob, 4)))
+print(secfb_noloc_results$sd_prob)
+print(paste("Mean Actual GB:", round(secfb_noloc_results$true_mean, 4)))
+
+```
+
+```{r}
+## save secondary fb, no location model
+
+save_xgb_model(secfb_noloc_results$model, "~/Desktop/secfb_exgb_noloc.rds")
+
+```
+
+```{r}
+## cutter model: with location
+
+cut_params <- list(
+  max_depth = 6,
+  eta = 0.02,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+cut_results <- train_and_eval_model(cut_df, features, target, cut_params)
+
+print(paste("Logloss:", round(cut_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(cut_results$accuracy, 4)))
+print(cut_results$confusion_matrix)
+print(paste("Brier Score:", round(cut_results$brier, 4)))
+
+xgb.plot.importance(cut_results$importance)
+
+hist(cut_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Cutter)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(cut_results$mean_prob, 4)))
+print(cut_results$sd_prob)
+print(paste("Mean Actual GB:", round(cut_results$true_mean, 4)))
+
+```
+
+
+```{r}
+## cutter model: no location 
+
+cut_noloc_params <- list(
+  max_depth = 7,
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+cut_noloc_results <- train_and_eval_model(cut_df, no_loc_features, target, cut_noloc_params)
+
+print(paste("Logloss:", round(cut_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(cut_noloc_results$accuracy, 4)))
+print(cut_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(cut_noloc_results$brier, 4)))
+
+xgb.plot.importance(cut_noloc_results$importance)
+
+hist(cut_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Cutter, No Location)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(cut_noloc_results$mean_prob, 4)))
+print(cut_noloc_results$sd_prob)
+print(paste("Mean Actual GB:", round(cut_noloc_results$true_mean, 4)))
+
+```
+
+
+```{r}
+## save cutter, no location model
+
+save_xgb_model(cut_noloc_results$model, "~/Desktop/cut_exgb_noloc.rds")
+
+```
+
+```{r}
+## offspeed model: with location
+
+offs_params <- list(
+  max_depth = 6,
+  eta = 0.04,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+offs_results <- train_and_eval_model(offs_df, features, target, offs_params)
+
+print(paste("Logloss:", round(offs_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(offs_results$accuracy, 4)))
+print(offs_results$confusion_matrix)
+print(paste("Brier Score:", round(offs_results$brier, 4)))
+
+xgb.plot.importance(offs_results$importance)
+
+hist(offs_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Offspeed)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(offs_results$mean_prob, 4)))
+print(offs_results$sd_prob)
+print(paste("Mean Actual GB:", round(offs_results$true_mean, 4)))
+
+```
+
+```{r}
+## offspeed model: no location
+
+offs_noloc_params <- list(
+  max_depth = 4,
+  eta = 0.04,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+offs_noloc_results <- train_and_eval_model(offs_df, no_loc_features, target, offs_noloc_params)
+
+print(paste("Logloss:", round(offs_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(offs_noloc_results$accuracy, 4)))
+print(offs_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(offs_noloc_results$brier, 4)))
+
+xgb.plot.importance(offs_noloc_results$importance)
+
+hist(offs_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Offspeed, No Location)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(offs_noloc_results$mean_prob, 4)))
+print(offs_noloc_results$sd_prob)
+print(paste("Mean Actual GB:", round(offs_noloc_results$true_mean, 4)))
+
+```
+
+```{r}
+## save offspeed, no location model 
+
+save_xgb_model(offs_noloc_results$model, "~/Desktop/offs_exgb_noloc.rds")
+
+```
+
+
+```{r}
+## curveball model: with location
+
+cb_params <- list(
+  max_depth = 4,
+  eta = 0.06,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+cb_results <- train_and_eval_model(cb_df, features, target, cb_params)
+
+print(paste("Logloss:", round(cb_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(cb_results$accuracy, 4)))
+print(cb_results$confusion_matrix)
+print(paste("Brier Score:", round(cb_results$brier, 4)))
+
+xgb.plot.importance(cb_results$importance)
+
+hist(cb_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Curveball)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(cb_results$mean_prob, 4)))
+print(cb_results$sd_prob)
+print(paste("Mean Actual GB:", round(cb_results$true_mean, 4)))
+
+```
+
+```{r}
+## curveball model: no location
+
+cb_noloc_params <- list(
+  max_depth = 4,
+  eta = 0.04,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+cb_noloc_results <- train_and_eval_model(cb_df, no_loc_features, target, cb_noloc_params)
+
+print(paste("Logloss:", round(cb_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(cb_noloc_results$accuracy, 4)))
+print(cb_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(cb_noloc_results$brier, 4)))
+
+xgb.plot.importance(cb_noloc_results$importance)
+
+hist(cb_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Curveball, No Location)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(cb_noloc_results$mean_prob, 4)))
+print(cb_noloc_results$sd_prob)
+print(paste("Mean Actual GB:", round(cb_noloc_results$true_mean, 4)))
+
+
+```
+
+```{r}
+## save curveball, no location model
+
+save_xgb_model(cb_noloc_results$model, "~/Desktop/cb_exgb_noloc.rds")
+
+```
+
+```{r}
+## slider model: with location
+
+sl_params <- list(
+  max_depth = 6,
+  eta = 0.08,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+sl_results <- train_and_eval_model(sl_df, features, target, sl_params)
+
+print(paste("Logloss:", round(sl_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(sl_results$accuracy, 4)))
+print(sl_results$confusion_matrix)
+print(paste("Brier Score:", round(sl_results$brier, 4)))
+
+xgb.plot.importance(sl_results$importance)
+
+hist(sl_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Slider)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(sl_results$mean_prob, 4)))
+print(sl_results$sd_prob)
+print(paste("Mean Actual GB:", round(sl_results$true_mean, 4)))
+
+```
+
+```{r}
+## slider model: no location
+
+sl_noloc_params <- list(
+  max_depth = 7,
+  eta = 0.08,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  objective = "binary:logistic",
+  eval_metric = "logloss"
+)
+
+sl_noloc_results <- train_and_eval_model(sl_df, no_loc_features, target, sl_noloc_params)
+
+print(paste("Logloss:", round(sl_noloc_results$cv_logloss, 4)))
+print(paste("Accuracy:", round(sl_noloc_results$accuracy, 4)))
+print(sl_noloc_results$confusion_matrix)
+print(paste("Brier Score:", round(sl_noloc_results$brier, 4)))
+
+xgb.plot.importance(sl_noloc_results$importance)
+
+hist(sl_noloc_results$probs, breaks = 30,
+     main = "GB Probability Distribution (Slider, No Location)", xlab = "Probability")
+
+print(paste("Mean Predicted Probability:", round(sl_noloc_results$mean_prob, 4)))
+print(sl_noloc_results$sd_prob)
+print(paste("Mean Actual GB:", round(sl_noloc_results$true_mean, 4)))
+
+```
+
+```{r}
+## save slider, no location model
+
+save_xgb_model(sl_noloc_results$model, "~/Desktop/sl_exgb_noloc.rds")
+
+```
+
+
+
+
+
+
