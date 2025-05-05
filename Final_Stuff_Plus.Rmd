@@ -1,0 +1,612 @@
+---
+title: "Stuff+ Model"
+output: html_document
+date: "2025-04-16"
+---
+
+```{r}
+## Building a Stuff+ model
+
+## Thank you to Thomas Nestico, Jeremy Maschino, Eno Sarris, and many, many others for their previous work with Stuff+ & their inspiration/ideas
+```
+
+```{r ImportPackages}
+
+## import packages
+pacman::p_load(boot, caret, dplyr, ggplot2, lightgbm, Matrix, Metrics, ParBayesianOptimization, purrr, readr, tidyr)
+
+```
+
+```{r ImportData}
+
+trackman <- read.csv("~/Desktop/d1_trackman.csv")
+
+## below is commented out; use to load above file
+## this loads from project folder
+
+# load("~/Desktop/Stuff_Plus/trackman.rda")
+
+
+```
+
+```{r FilterDF}
+
+## preparing df for model
+
+clean_trackman_data <- function(df) {
+  df %>%
+    mutate(Count = paste0(Balls, "-", Strikes)) %>%
+    filter(
+      Balls < 4,
+      Strikes < 3,
+      Outs < 3,
+      PitcherThrows %in% c("Right", "Left"),
+      RelSpeed >= 55,
+      RelSpeed <= 100,
+      !is.na(Balls),
+      !is.na(Strikes),
+      !is.na(TaggedPitchType),
+      !is.na(RelSpeed),
+      !is.na(SpinAxis),
+      !is.na(RelHeight),
+      !is.na(RelSide),
+      !is.na(Extension),
+      !is.na(InducedVertBreak),
+      !is.na(HorzBreak),
+      !is.na(PlateLocHeight),
+      !is.na(PlateLocSide),
+      PitchCall != "Undefined",
+      TaggedPitchType != "Undefined",
+      TaggedPitchType != "Other",
+      PitchCall != "Undefined",
+      PitchCall != "BallCalled"
+    )
+}
+
+
+trackman <- clean_trackman_data(trackman)
+
+
+```
+
+```{r AssigningRunValues}
+
+## load run values csv from TJ Stats
+run_values <- read.csv("~/Desktop/stuff_plus/run_values.csv")
+
+## filter out non-pitch events
+trackman <- trackman %>%
+  filter(
+    !(PitchCall == "InPlay" & PlayResult %in% c("Undefined", "StolenBase", "CaughtStealing"))
+  )
+
+## assigning events for rv
+assign_event_type <- function(df) {
+  df %>%
+    mutate(
+      event_type = case_when(
+        KorBB %in% c("Strikeout") ~ "strikeout",
+        KorBB %in% c("Walk", "walk") ~ "walk",
+        PitchCall %in% c("BallCalled", "BallinDirt", "BallIntentional") ~ "ball",
+        PitchCall == "StrikeCalled" ~ "called_strike",
+        PitchCall == "StrikeSwinging" ~ "swinging_strike",
+        PitchCall == "FoulBall" ~ "foul",
+        PitchCall == "HitByPitch" ~ "hit_by_pitch",
+        PitchCall == "InPlay" & PlayResult %in% c("Single", "SIngle") ~ "single",
+        PitchCall == "InPlay" & PlayResult == "Double" ~ "double",
+        PitchCall == "InPlay" & PlayResult == "Triple" ~ "triple",
+        PitchCall == "InPlay" & PlayResult == "HomeRun" ~ "home_run",
+        PitchCall == "InPlay" & PlayResult %in% c("Out", "FieldersChoice", "Error", "Sacrifice") ~ "field_out",
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    filter(!is.na(event_type))
+}
+
+
+trackman <- trackman %>%
+  assign_event_type() %>%
+  filter(event_type %in% c("swinging_strike", "foul", "single", "double", "triple", "home_run", "field_out")) %>%
+  left_join(run_values, by = c("event_type" = "event", "Balls" = "balls", "Strikes" = "strikes")) %>%
+  rename(rv = delta_run_exp) %>%
+  filter(!is.na(rv))
+
+
+```
+
+```{r FlipForLHP}
+
+## flip LHP to make analysis easier
+adjust_for_handedness <- function(df) {
+  df %>%
+    mutate(
+      HorzBreak = if_else(PitcherThrows == "Left", -HorzBreak, HorzBreak),
+      RelSide   = if_else(PitcherThrows == "Left", -RelSide, RelSide)
+      )
+}
+
+trackman <- adjust_for_handedness(trackman)
+
+
+```
+
+```{r PseudoAccel}
+## rather than using acceleration, testing with just movement/velocity
+## this is not actual acceleration, but it does have more signal than simply using the raw breaks
+
+mimic_acceleration <- function(df){
+  df %>%
+    mutate(
+      A_HorzBreak = HorzBreak/RelSpeed,
+      A_VertBreak = InducedVertBreak/RelSpeed
+    )
+}
+
+trackman <- mimic_acceleration(trackman)
+
+```
+
+
+```{r PlotRV}
+
+## plotting rv to see distribution
+
+ggplot(trackman, aes(x = rv)) +
+  geom_histogram(aes(y = ..density..), binwidth = 0.03, color = "white", fill = "#0C2340") +
+  labs(
+    title = "Distribution of Run Values with Density Curve",
+    x = "Run Value (rv)",
+    y = "Density"
+  ) +
+  theme_minimal()
+
+
+```
+
+
+```{r PitchTypes}
+
+## Categorizing Pitch Types and creating pitch type specific df
+
+trackman <- trackman %>%
+  mutate(
+    PitchType = case_when(
+      TaggedPitchType %in% c("Fastball", "FourSeamFastBall") ~ "Fastball",
+      TaggedPitchType %in% c("Sinker", "TwoSeamFastBall", "OneSeamFastBall") ~ "Sec_Fastball",
+      TaggedPitchType %in% c("Splitter", "ChangeUp", "Knuckleball") ~ "Offspeed",
+      TaggedPitchType == "Slider" ~ "Slider",
+      TaggedPitchType == "Cutter" ~ "Cutter",
+      TaggedPitchType == "Curveball" ~ "Curveball"
+    )
+  )
+
+filter_pitch <- function(df, pitch) {
+  df %>% filter(PitchType == pitch)
+}
+
+FB_trackman    <- filter_pitch(trackman, "Fastball")
+SecFB_trackman <- filter_pitch(trackman, "Sec_Fastball")
+OS_trackman    <- filter_pitch(trackman, "Offspeed")
+SL_trackman    <- filter_pitch(trackman, "Slider")
+CT_trackman    <- filter_pitch(trackman, "Cutter")
+CB_trackman    <- filter_pitch(trackman, "Curveball")
+
+
+```
+
+
+```{r FilterOutliersOut}
+
+## noticed some weird outliers
+## want to filter out observations where metrics are outside of 4 SD
+
+filter_z_outliers <- function(df, vars, threshold = 4) {
+  z_scores <- scale(df[, vars])
+  keep_rows <- apply(abs(z_scores) <= threshold, 1, all)
+  df[keep_rows, ]
+}
+
+vars <- c("RelSpeed", "SpinRate", "RelHeight", "RelSide", "Extension", "InducedVertBreak", "HorzBreak")
+
+FB_trackman       <- filter_z_outliers(FB_trackman, vars)
+SecFB_trackman    <- filter_z_outliers(SecFB_trackman, vars)
+OS_trackman       <- filter_z_outliers(OS_trackman, vars)
+SL_trackman       <- filter_z_outliers(SL_trackman, vars)
+CT_trackman       <- filter_z_outliers(CT_trackman, vars)
+CB_trackman       <- filter_z_outliers(CB_trackman, vars)
+
+filter_z_outliers <- function(df, vars, threshold = 4, label = NULL) {
+  n_before <- nrow(df)
+  z_scores <- scale(df[, vars])
+  keep_rows <- apply(abs(z_scores) <= threshold, 1, all)
+  df_filtered <- df[keep_rows, ]
+  n_after <- nrow(df_filtered)
+  
+  if (!is.null(label)) {
+    cat(label, " - Removed:", n_before - n_after, "| Remaining:", n_after, "\n")
+  }
+  
+  return(df_filtered)
+}
+
+FB_trackman    <- filter_z_outliers(FB_trackman, vars, label = "FB")
+SecFB_trackman <- filter_z_outliers(SecFB_trackman, vars, label = "SecFB")
+OS_trackman    <- filter_z_outliers(OS_trackman, vars, label = "OS")
+SL_trackman    <- filter_z_outliers(SL_trackman, vars, label = "SL")
+CT_trackman    <- filter_z_outliers(CT_trackman, vars, label = "CT")
+CB_trackman    <- filter_z_outliers(CB_trackman, vars, label = "CB")
+
+## eliminating NA from the df
+
+check_na <- function(df, label) {
+  features <- c("RelSpeed", "A_VertBreak", "A_HorzBreak", "RelHeight", "RelSide", "Extension")
+  target <- "rv"
+  cols <- c(features, target)
+  missing_counts <- colSums(is.na(df[, cols]))
+  cat("\n", label, "- Missing values in features:\n")
+  print(missing_counts)
+}
+
+check_na(FB_trackman, "FB")
+check_na(SecFB_trackman, "SecFB")
+check_na(OS_trackman, "OS")
+check_na(SL_trackman, "SL")
+check_na(CT_trackman, "CT")
+check_na(CB_trackman, "CB")
+
+remove_na_rows <- function(df) {
+  vars <- c("RelSpeed", "A_VertBreak", "A_HorzBreak", "RelHeight", "RelSide", "Extension", "rv")
+  df %>% filter(if_all(all_of(vars), ~ !is.na(.)))
+}
+
+FB_trackman    <- remove_na_rows(FB_trackman)
+SecFB_trackman <- remove_na_rows(SecFB_trackman)
+OS_trackman    <- remove_na_rows(OS_trackman)
+SL_trackman    <- remove_na_rows(SL_trackman)
+CT_trackman    <- remove_na_rows(CT_trackman)
+CB_trackman    <- remove_na_rows(CB_trackman)
+
+```
+
+
+```{r}
+## testing batted ball types for cutoff
+
+in_play <- trackman %>%
+  filter(PitchCall == 'InPlay',
+         TaggedHitType != 'Undefined') %>%
+    mutate(
+    PlayResult = ifelse(PlayResult == "SIngle", "Single", PlayResult),
+    woba = case_when(
+      PlayResult == "Single" ~ 0.79,
+      PlayResult == "Double" ~ 1.12,
+      PlayResult == "Triple" ~ 1.40,
+      PlayResult == "HomeRun" ~ 1.74,
+      TRUE ~ 0  # Out, FieldersChoice, Error, Sacrifice
+    )
+  )
+
+in_play <- in_play %>%
+  mutate(
+    ContactType = case_when(
+      Angle < 10 ~ "Groundball",
+      Angle >= 10 & Angle < 25 ~ "Line Drive",
+      Angle >= 25 & Angle < 50 ~ "FlyBall",
+      Angle >= 50 ~ "Popup",
+      TRUE ~ NA_character_
+    )
+  )
+
+binned_data <- in_play %>%
+  filter(!is.na(ExitSpeed), !is.na(Angle), !is.na(woba), !is.na(ContactType)) %>%
+  mutate(
+    ExitSpeed_bin = floor(ExitSpeed / 1),
+    Angle_bin = floor(Angle / 1)
+  )
+
+plot_heatmap <- function(data, title_label) {
+  data %>%
+    group_by(ExitSpeed_bin, Angle_bin) %>%
+    summarise(mean_woba = mean(woba), .groups = "drop") %>%
+    ggplot(aes(x = ExitSpeed_bin, y = Angle_bin, fill = mean_woba)) +
+    geom_tile() +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                         midpoint = 0.35, name = "wOBA") +
+    labs(
+      title = title_label,
+      x = "Exit Velocity (mph)",
+      y = "Launch Angle (°)"
+    ) +
+    theme_minimal()
+}
+
+plot_groundball <- plot_heatmap(filter(binned_data, ContactType == "Groundball"), "Groundballs")
+plot_linedrive   <- plot_heatmap(filter(binned_data, ContactType == "Line Drive"), "Line Drives")
+plot_flyball     <- plot_heatmap(filter(binned_data, ContactType == "FlyBall"), "Fly Balls")
+plot_popup       <- plot_heatmap(filter(binned_data, ContactType == "Popup"), "Popups")
+plot_all         <- plot_heatmap(binned_data, "All Contact Types")
+
+print(plot_groundball)
+print(plot_linedrive)
+print(plot_flyball)
+print(plot_popup)
+print(plot_all)
+
+
+```
+```{r FunctionRunModel}
+
+fit_stuff_model <- function(pitch_data, pitch_label) {
+  
+  features <- c("RelSpeed", "A_VertBreak", "A_HorzBreak", "RelHeight", "RelSide", "Extension") 
+  ## very scaled back feature list
+  y <- pitch_data$rv
+  
+  evaluate_model <- function(preds, actual) {
+    mae <- mean(abs(preds - actual))
+    naive_mae <- mean(abs(actual - mean(actual)))
+    mase <- mae / naive_mae ## how much better v predicting mean
+    list(MAE = mae, MASE = mase)
+  }
+  
+  ## lightgbm tuning
+  X_tune <- as.matrix(pitch_data[, features])
+  dtrain_tune <- lgb.Dataset(data = X_tune, label = y)
+  
+  ## using bayesian optimization objective function to minimize mae
+  scoringFunction <- function(learning_rate, num_leaves, max_depth,
+                               min_child_samples, subsample, colsample_bytree,
+                               reg_alpha, reg_lambda, min_split_gain) {
+    
+    params <- list(
+      objective = "regression_l1", 
+      ## best for run values & outliers associated
+      feature_pre_filter = FALSE,
+      learning_rate = learning_rate,
+      num_leaves = as.integer(num_leaves),
+      max_depth = as.integer(max_depth),
+      min_child_samples = as.integer(min_child_samples),
+      subsample = subsample,
+      colsample_bytree = colsample_bytree,
+      reg_alpha = reg_alpha,
+      reg_lambda = reg_lambda,
+      min_split_gain = min_split_gain,
+      verbose = -1
+    )
+    
+    ## train model temporary with tested parameters
+    model <- lgb.train(
+      params = params,
+      data = dtrain_tune,
+      nrounds = 200,  
+      verbose = -1
+    )
+    
+    ## returning results for bayesian optimization
+    preds <- predict(model, X_tune)
+    mae <- mean(abs(preds - y))
+    return(list(Score = -mae))
+  }
+  
+  bounds <- list(
+    learning_rate = c(0.01, 0.05),  
+    num_leaves = c(20L, 60L),       
+    max_depth = c(4L, 10L),        
+    min_child_samples = c(10L, 40L),
+    subsample = c(0.7, 1.0),
+    colsample_bytree = c(0.7, 1.0),
+    reg_alpha = c(0.0, 0.3),
+    reg_lambda = c(0.0, 0.3),
+    min_split_gain = c(0.0, 1.0)
+  )
+  
+  ## actually performing bayesian hyperparameter optimization 
+  set.seed(42)
+  opt_results <- bayesOpt(
+    FUN = scoringFunction,
+    bounds = bounds,
+    initPoints = 10,  
+    iters.n = 7,      
+    acq = "ucb", ## upper confidence bound
+    kappa = 2.576,
+    verbose = 0
+  )
+  
+  best_params <- getBestPars(opt_results)
+  
+  ## training model w best parameters
+  
+  X <- as.matrix(pitch_data[, features])
+  dtrain <- lgb.Dataset(data = X, label = y)
+  
+  final_model <- lgb.train(
+    data = dtrain,
+    params = modifyList(best_params, list(objective = "regression_l1", feature_pre_filter = FALSE, verbose = -1)),
+    nrounds = 200   # --- reduced nrounds ---
+  )
+  
+  preds <- predict(final_model, X)
+  eval <- evaluate_model(preds, y)
+  print(paste0("Evaluation for ", pitch_label, ":"))
+  print(eval)
+  
+  ## shap values for feature importance
+  shap <- predict(final_model, X, type = "contrib")
+  shap_df <- as.data.frame(shap[, -ncol(shap)])
+  colnames(shap_df) <- features
+  
+  mean_shap <- data.frame(
+    Feature = colnames(shap_df),
+    MeanAbsShap = apply(abs(shap_df), 2, mean)
+  ) %>% arrange(desc(MeanAbsShap))
+  
+  shap_plot <- ggplot(mean_shap, aes(x = reorder(Feature, MeanAbsShap), y = MeanAbsShap)) +
+    geom_col(fill = "#0C2340") +
+    coord_flip() +
+    labs(title = paste("SHAP Values -", pitch_label), x = "Feature", y = "Mean |SHAP|") +
+    theme_minimal()
+  
+  print(shap_plot)
+  
+  return(list(model = final_model, evaluation = eval))
+}
+
+```
+
+
+```{r RunModel}
+
+## running model for individual pitch types
+
+fb_model <- fit_stuff_model(FB_trackman, "Fastball")
+sl_model <- fit_stuff_model(SL_trackman, "Slider")
+cb_model <- fit_stuff_model(CB_trackman, "Curveball")
+os_model <- fit_stuff_model(OS_trackman, "Offspeed")
+ct_model <- fit_stuff_model(CT_trackman, "Cutter")
+secfb_model <- fit_stuff_model(SecFB_trackman, "Secondary Fastball")
+
+```
+
+```{r}
+
+## scale stuff+ to have sd 10, average 100
+  mean_rv <- mean(preds)
+  sd_rv <- sd(preds)
+  stuff_plus <- ((preds - mean_rv) / sd_rv) * 10 + 100
+  list(stuff_plus = stuff_plus, mean_rv = mean_rv, sd_rv = sd_rv)
+
+## save model and scaling factors
+save_stuff_model <- function(model_object, pitch_label, preds, save_path = ".") {
+  # Scale predictions
+  scaled <- scale_stuff_plus(preds)
+  
+  model_path <- file.path(save_path, paste0(pitch_label, "_model.txt"))
+  lgb.save(model_object$model, model_path)
+  
+  scale_path <- file.path(save_path, paste0(pitch_label, "_scaling.rds"))
+  saveRDS(list(mean = scaled$mean_rv, sd = scaled$sd_rv), scale_path)
+  
+  # Return Stuff+ scores
+  return(scaled$stuff_plus)
+}
+
+
+pitch_types <- list(
+  Fastball = list(data = FB_trackman, model = fb_model),
+  Slider = list(data = SL_trackman, model = sl_model),
+  Curveball = list(data = CB_trackman, model = cb_model),
+  Offspeed = list(data = OS_trackman, model = os_model),
+  Cutter = list(data = CT_trackman, model = ct_model),
+  SecondaryFastball = list(data = SecFB_trackman, model = secfb_model)
+)
+
+stuff_plus_outputs <- list()
+
+for (pitch in names(pitch_types)) {
+  cat("Processing:", pitch, "\n")
+  
+  dat <- pitch_types[[pitch]]$data
+  mod <- pitch_types[[pitch]]$model
+  X <- as.matrix(dat[, features])
+  preds <- predict(mod$model, X)
+  
+  stuff_plus <- save_stuff_model(mod, pitch, preds)
+  stuff_plus_outputs[[pitch]] <- stuff_plus
+}
+
+
+```
+
+```{r}
+
+## combining pitch types/attach stuff+ values
+all_pitches <- bind_rows(
+  lapply(names(pitch_types), function(pitch) {
+    dat <- pitch_types[[pitch]]$data
+    dat$StuffPlus <- stuff_plus_outputs[[pitch]]
+    dat$PitchType <- pitch
+    dat
+  })
+)
+
+## group by pitcher choronologically using date
+
+pitcher_stability <- all_pitches %>%
+  group_by(Pitcher) %>%
+  arrange(Date) %>%  
+  mutate(PitchNum = row_number()) %>%
+  filter(!is.na(StuffPlus)) %>%
+  group_split()
+
+
+# get average stuff+ early/late
+stability_data <- map_dfr(pitcher_stability, function(df) {
+  total_pitches <- nrow(df)
+  max_check <- min(100, floor(total_pitches / 2))
+  
+  if (max_check < 5) return(NULL)  # Skip pitchers with too few pitches
+  
+  map_dfr(seq(5, max_check, by = 5), function(n) {
+    early <- mean(df$StuffPlus[1:n]) 
+    ## stuff+ for first n pitches
+    late <- mean(df$StuffPlus[(n + 1):total_pitches])
+    ## stuff+ for remaining pitches
+    
+    tibble(Pitcher = df$Pitcher[1], N = n, Early = early, Late = late)
+  })
+})
+
+# bootstrap correlation for correlation b/w early/late
+boot_corr <- function(data, indices) {
+  d <- data[indices, ]
+  cor(d$Early, d$Late, use = "complete.obs") 
+  ## pearson correlation
+}
+
+## apply bootstrapping for each sample size n to get correlation
+boot_results <- stability_data %>%
+  group_by(N) %>%
+  group_split() %>%
+  map_dfr(function(df) {
+    if (nrow(df) < 10) return(NULL)  
+    
+    b <- tryCatch(boot(df, statistic = boot_corr, R = 1000), error = function(e) return(NULL))
+    if (is.null(b)) return(NULL)
+    
+    ## 95th percentile CI
+    ci <- tryCatch(boot.ci(b, type = "perc")$percent[4:5], error = function(e) c(NA, NA))
+    
+    tibble(
+      N = unique(df$N),
+      Correlation = mean(b$t, na.rm = TRUE),
+      Lower = ci[1],
+      Upper = ci[2]
+    )
+  })
+
+
+# Find where correlation > 0.7
+stabilization_point <- boot_results %>%
+  filter(Correlation >= 0.7) %>%
+  arrange(N) %>%
+  head(1) 
+
+
+# Plot
+ggplot(boot_results, aes(x = N, y = Correlation)) +
+  geom_line(linewidth = 1.2) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "steelblue", alpha = 0.2) +
+  geom_hline(yintercept = 0.7, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = stabilization_point$N, linetype = "dotted", color = "darkblue") +
+  annotate("text", x = stabilization_point$N, y = 0.72, 
+           label = paste0("", stabilization_point$N, " pitches"), 
+           angle = 90, vjust = -0.5, hjust = 0, color = "darkblue", size = 3.5) +
+  labs(
+    title = "Stuff+ Stabilization by Sample Size",
+    x = "Number of Pitches",
+    y = "Correlation (Early vs Later Stuff+)"
+  ) +
+  theme_minimal()
+
+
+```
