@@ -1,4 +1,4 @@
 # Pitching+ Model Updates
   -Revamped Stuff+, Location+, and Pitching+ models
   
-  -Adding xGB% model
+  -Adding xGB% and xWhiff% models
