@@ -1,4 +1,4 @@
-# This repo has a bunch of machine learning models to evaluate baseball players. Current models: 
+# This repo has a bunch of models that can be used to evaluate baseball players. Current models: 
   - Stuff+, xWhiff%, xGB%, and a script that calculates a cut-off for 'hard-hit' batted ball
   - While the main focus is pitching, I tend to add some hitting models as well. 
 
