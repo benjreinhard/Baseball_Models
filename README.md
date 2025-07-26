@@ -9,14 +9,13 @@
   - Hit Tool Model
     - Could be used as some sort of draft model.
   - Mix+, Match+, Pitching+, Location+
-     - The Pitching+ and Location+ models are a WIP at the moment.
-     - I also want to do a MLB Stuff+ model, but that is a low priority for me.
+     - All of the models are WIP. I change my mind a lot on how exactly they should work & what i want to do. 
      - Location+ model could also be expanded into others, see this article:       
        https://blogs.fangraphs.com/revisiting-the-kirby-index/
   - Some biomechanics models
       - For both hitting and pitching.
       - These are really initial stage of ideas.
-      - For pitching, I think something on maximizing velocity while minimizing stress (elbow valgus?) would           be really cool
+      - For pitching, I think something on maximizing velocity while minimizing stress (elbow valgus?) would be really cool
 
 
 
