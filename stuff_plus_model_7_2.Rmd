@@ -519,7 +519,7 @@ for (ptype in names(pitch_datasets)) {
   
   end_time <- Sys.time()
   duration <- round(as.numeric(difftime(end_time, start_time, units = "mins")), 2)
-  cat("✅ Completed", ptype, "in", duration, "minutes.\n")
+  cat("Completed", ptype, "in", duration, "minutes.\n")
   
   pitch_model_outputs[[ptype]] <- result
 }
