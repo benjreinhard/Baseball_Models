@@ -1,5 +1,5 @@
 # This repo has a bunch of models that can be used to evaluate baseball players. Current models: 
-  - Stuff+, xWhiff%, xGB%, and a script that calculates a cut-off for 'hard-hit' batted ball
+  - Stuff+, xWhiff%, xGB%, and a script that calculates a cut-off for 'hard-hit' batted ball. See note below -- all are wip
   - While the main focus is pitching, I tend to add some hitting models as well. 
 
 
